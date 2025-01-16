@@ -64,7 +64,7 @@ def create_app(config_class=Config):
                     region='us-west-2'
                 )
             )
-        
+        app.pinecone_environment=config.pinecone['environment']
         # Initialize vectorstore
         from langchain_pinecone import PineconeVectorStore
         app.vectorstore = PineconeVectorStore(
@@ -75,6 +75,7 @@ def create_app(config_class=Config):
         
         # Store the index_name in the app context for easy access
         app.pinecone_index_name = index_name
+        
         
         # Register blueprints
         logger.debug("Registering blueprints")

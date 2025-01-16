@@ -53,6 +53,7 @@ class LLMFactory:
             api_key = config.openai.api_key
             model = getattr(config.openai, 'model', 'gpt-4o')
         
+        logger.info("Using OpenAI LLM with model: %s", model)
         return ChatOpenAI(
             api_key=api_key,
             model_name=model
@@ -68,6 +69,7 @@ class LLMFactory:
             api_key = config.google.api_key
             model = getattr(config.google, 'model', 'gemini-1.5-flash')
         
+        logger.info("Using Google Gemini LLM with model: %s", model)
         return ChatGoogleGenerativeAI(
             google_api_key=api_key,
             model_name=model
@@ -107,6 +109,7 @@ class EmbeddingsFactory:
         else:
             api_key = config.openai.api_key
         
+        logger.info("Using OpenAI embeddings")
         return OpenAIEmbeddings(
             api_key=api_key
         )
@@ -118,6 +121,7 @@ class EmbeddingsFactory:
         else:
             api_key = config.google.api_key
         
+        logger.info("Using Google embeddings")
         return GoogleGenerativeAIEmbeddings(
             google_api_key=api_key
         )
@@ -154,8 +158,6 @@ class ChatService:
                 index_name=self.index_name,
                 embedding=self.embeddings
             )
-            
-            
             
             logger.debug("Setting up chat prompt template")
             self.prompt = ChatPromptTemplate.from_messages([

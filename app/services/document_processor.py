@@ -42,7 +42,7 @@ class DocumentProcessor:
         try:
             # Access the index_name from the Flask app context
             index_name = current_app.pinecone_index_name
-            index = pinecone.Index(index_name)
+            index = pinecone.Index(index_name,host=current_app.pinecone_environment)
             
             # Use sparse vectors query to get all documents
             results = []
