@@ -1,0 +1,15 @@
+Flask==3.1.0
+flask-cors==5.0.0
+flask-limiter==3.8.0
+gunicorn==21.2.0
+python-dotenv==1.0.1
+langchain>=0.3.13,<0.4.0  # Ensure this matches langchain-openai's requirements
+langchain-openai>=0.2.9,<0.3.0  # Keep compatibility with langchain
+# Consider updating langchain-google-genai if possible, or removing it if not needed.
+langchain-google-genai #should be checked for a compatible version or removed if not essential.
+pinecone-client==3.2.2
+python-multipart==0.0.6
+pandas==2.2.3
+python-docx==1.0.1
+PyPDF2==3.0.1
+pydantic>=2.7,<3  # Ensure compatibility with langchain

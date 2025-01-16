@@ -1,33 +1,165 @@
-# app/services/chat_service.py
 import logging
 import re
+import os
 from typing import Optional, List, Dict, Any
 from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts import ChatPromptTemplate
 from langchain.chains import LLMChain
 from app.utils.errors import ChatProcessingError
 from flask import current_app
+import pinecone
+from langchain_pinecone import PineconeVectorStore
+from langchain_openai import OpenAIEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 # Configure logger
 logger = logging.getLogger(__name__)
+
+class LLMFactory:
+    @staticmethod
+    def create_llm(config):
+        """Create LLM instance based on configuration."""
+        # Handle both Config object and dictionary
+        if isinstance(config, dict):
+            llm_type = config.get('llm_type', 'openai').lower()
+            openai_config = config.get('openai', {})
+            google_config = config.get('google', {})
+        else:
+            llm_type = getattr(config, 'llm_type', 'openai').lower()
+            openai_config = config.openai if hasattr(config, 'openai') else {}
+            google_config = config.google if hasattr(config, 'google') else {}
+        
+        if llm_type == 'openai':
+            if not openai_config.get('api_key'):
+                logger.warning("OpenAI API key not found, falling back to Google Gemini")
+                return LLMFactory._create_gemini(config)
+            return LLMFactory._create_openai(config)
+        elif llm_type == 'gemini':
+            if not google_config.get('api_key'):
+                logger.warning("Google API key not found, falling back to OpenAI")
+                return LLMFactory._create_openai(config)
+            return LLMFactory._create_gemini(config)
+        else:
+            raise ValueError(f"Unsupported LLM type: {llm_type}")
+
+    @staticmethod
+    def _create_openai(config):
+        if isinstance(config, dict):
+            openai_config = config.get('openai', {})
+            api_key = openai_config.get('api_key')
+            model = openai_config.get('model', 'gpt-4o')
+        else:
+            api_key = config.openai.api_key
+            model = getattr(config.openai, 'model', 'gpt-4o')
+        
+        return ChatOpenAI(
+            api_key=api_key,
+            model_name=model
+        )
+
+    @staticmethod
+    def _create_gemini(config):
+        if isinstance(config, dict):
+            google_config = config.get('google', {})
+            api_key = google_config.get('api_key')
+            model = google_config.get('model', 'gemini-1.5-flash')
+        else:
+            api_key = config.google.api_key
+            model = getattr(config.google, 'model', 'gemini-1.5-flash')
+        
+        return ChatGoogleGenerativeAI(
+            google_api_key=api_key,
+            model_name=model
+        )
+
+class EmbeddingsFactory:
+    @staticmethod
+    def create_embeddings(config):
+        """Create embeddings instance based on configuration."""
+        # Handle both Config object and dictionary
+        if isinstance(config, dict):
+            embedding_type = config.get('embedding_type', 'openai').lower()
+            openai_config = config.get('openai', {})
+            google_config = config.get('google', {})
+        else:
+            embedding_type = getattr(config, 'embedding_type', 'openai').lower()
+            openai_config = config.openai if hasattr(config, 'openai') else {}
+            google_config = config.google if hasattr(config, 'google') else {}
+        
+        if embedding_type == 'openai':
+            if not openai_config.get('api_key'):
+                logger.warning("OpenAI API key not found, falling back to Google embeddings")
+                return EmbeddingsFactory._create_google_embeddings(config)
+            return EmbeddingsFactory._create_openai_embeddings(config)
+        elif embedding_type == 'google':
+            if not google_config.get('api_key'):
+                logger.warning("Google API key not found, falling back to OpenAI embeddings")
+                return EmbeddingsFactory._create_openai_embeddings(config)
+            return EmbeddingsFactory._create_google_embeddings(config)
+        else:
+            raise ValueError(f"Unsupported embeddings type: {embedding_type}")
+
+    @staticmethod
+    def _create_openai_embeddings(config):
+        if isinstance(config, dict):
+            api_key = config.get('openai', {}).get('api_key')
+        else:
+            api_key = config.openai.api_key
+        
+        return OpenAIEmbeddings(
+            api_key=api_key
+        )
+
+    @staticmethod
+    def _create_google_embeddings(config):
+        if isinstance(config, dict):
+            api_key = config.get('google', {}).get('api_key')
+        else:
+            api_key = config.google.api_key
+        
+        return GoogleGenerativeAIEmbeddings(
+            google_api_key=api_key
+        )
 
 class ChatService:
     def __init__(self, config):
         """Initialize ChatService with configuration."""
         logger.info("Initializing ChatService")
         try:
+            # Ensure config is an instance of Config, not a dictionary
+            if isinstance(config, dict):
+                raise ValueError("Config must be an instance of the Config class, not a dictionary.")
+            
+            # Use the config object directly
             self.config = config
             
-            logger.debug("Initializing OpenAI Chat model")
-            self.llm = ChatOpenAI(
-                api_key=self.config.openai['api_key'],
-                base_url=self.config.openai['base_url'],
-                model_name=self.config.openai['model']
+            # Initialize LLM
+            logger.debug("Initializing LLM")
+            self.llm = LLMFactory.create_llm(self.config)
+            
+            # Initialize Pinecone
+            logger.debug("Initializing Pinecone")
+            pinecone.init(
+                api_key=self.config.pinecone.api_key,  # Use dot notation
+                environment=self.config.pinecone.environment  # Use dot notation
             )
+            
+            # Initialize embeddings
+            self.embeddings = EmbeddingsFactory.create_embeddings(self.config)
+            
+            # Initialize vector store
+            self.index_name = self.config.pinecone.index_name  # Use dot notation
+            self.vectorstore = PineconeVectorStore(
+                index_name=self.index_name,
+                embedding=self.embeddings
+            )
+            
+            
             
             logger.debug("Setting up chat prompt template")
             self.prompt = ChatPromptTemplate.from_messages([
-                ("system", """You are a legal assistant that provides clear and accurate answers based on the given context or your knowledge base about Indian Constitution. if context doesnt match the query use your knaowledge, dont complain that the context provided does not include any information about blah blah blah.
+                ("system", """You are Saanvi, an AI assistant specializing in cybersecurity. Your purpose is to provide clear and accurate answers based on the cyber security context provided through the book 'Cyber Safe Girl' by Dr. Ananth Prabhu G. If the context doesn't match the query, use your knowledge about cybersecurity, but maintain the focus on digital safety and security.
 
 Instructions for formatting your responses:
 - Use only plain text without any special formatting
@@ -39,7 +171,7 @@ Instructions for formatting your responses:
 
 Context: {context}
 
-Remember to only use information present in the context. If information isn't available in the context, use your knowledge thats it,."""),
+Remember to focus on cybersecurity aspects and digital safety while maintaining a helpful and informative tone."""),
                 ("human", "{question}")
             ])
             
@@ -55,6 +187,7 @@ Remember to only use information present in the context. If information isn't av
         except Exception as e:
             logger.error(f"Failed to initialize ChatService: {str(e)}", exc_info=True)
             raise
+
 
     def extract_searchable_content(self, doc) -> List[str]:
         """Extract all searchable content from a document, including metadata."""

@@ -1,15 +1,11 @@
-# app/__init__.py
 import logging
 from flask import Flask
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from config import Config
-import chromadb
-from chromadb.config import Settings
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
-import shutil
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 import os
+from pinecone import Pinecone, ServerlessSpec
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -42,51 +38,43 @@ def create_app(config_class=Config):
         logger.debug("Initializing rate limiter")
         limiter.init_app(app)
         
-        # Initialize HuggingFace embeddings
-        logger.debug("Initializing HuggingFace embeddings")
-        embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        # Initialize Google's embedding model
+        logger.debug("Initializing Google embeddings")
+        embeddings = GoogleGenerativeAIEmbeddings(
+            google_api_key=config.google['api_key'],
+            model="models/embedding-001"  # Google's text embedding model
         )
         
-        # Initialize ChromaDB
-        logger.debug("Initializing ChromaDB")
-        persist_dir = config.chroma_settings['persist_directory']
-        
-        # Ensure the persist directory exists
-        os.makedirs(persist_dir, exist_ok=True)
-        
-        # Create settings for both client and vectorstore
-        chroma_settings = Settings(
-            anonymized_telemetry=False,
-            is_persistent=True
+        # Create an instance of Pinecone
+        logger.debug("Initializing Pinecone")
+        pc = Pinecone(
+            api_key=config.pinecone['api_key']
         )
         
-        try:
-            # First try to create a new persistent client
-            app.chroma_client = chromadb.PersistentClient(
-                path=persist_dir,
-                settings=chroma_settings
-            )
-        except ValueError as e:
-            if "already exists" in str(e):
-                logger.info("Connecting to existing ChromaDB instance")
-                # If database exists, use the existing settings
-                app.chroma_client = chromadb.PersistentClient(
-                    path=persist_dir
+        # Get or create Pinecone index
+        index_name = config.pinecone['index_name']
+        if index_name not in pc.list_indexes().names():
+            logger.info(f"Creating new Pinecone index: {index_name}")
+            pc.create_index(
+                name=index_name,
+                dimension=768,  # Dimension for Google's embedding model
+                metric="cosine",
+                spec=ServerlessSpec(
+                    cloud='aws',
+                    region='us-west-2'
                 )
-            else:
-                raise
+            )
         
-        # Create or get collection
-        app.chroma_collection = app.chroma_client.get_or_create_collection("documents")
-        
-        # Initialize vectorstore with the existing client
-        app.vectorstore = Chroma(
-            client=app.chroma_client,
-            collection_name="documents",
-            embedding_function=embeddings,
-            persist_directory=persist_dir
+        # Initialize vectorstore
+        from langchain_pinecone import PineconeVectorStore
+        app.vectorstore = PineconeVectorStore(
+            index_name=index_name,
+            embedding=embeddings,
+            text_key="text"
         )
+        
+        # Store the index_name in the app context for easy access
+        app.pinecone_index_name = index_name
         
         # Register blueprints
         logger.debug("Registering blueprints")
@@ -103,8 +91,6 @@ def create_app(config_class=Config):
         def cleanup(exc):
             """Clean up resources on app context teardown."""
             logger.debug("Cleaning up application resources")
-            if hasattr(app, 'vectorstore'):
-                app.vectorstore.persist()
         
         logger.info("Flask application created successfully")
         return app
@@ -122,5 +108,5 @@ def init_logging():
     
     # Set log levels for some verbose libraries
     logging.getLogger('urllib3').setLevel(logging.WARNING)
-    logging.getLogger('chromadb').setLevel(logging.WARNING)
+    logging.getLogger('pinecone').setLevel(logging.WARNING)
     logging.getLogger('flask').setLevel(logging.INFO)
