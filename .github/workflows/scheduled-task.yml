@@ -1,0 +1,13 @@
+name: Send Scheduled Request
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"  # Runs every 10 minutes
+
+jobs:
+  send-request:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send request to Flask app
+        run: |
+          curl -X POST https://saanvi-chatbot.onrender.com/api/chat -H "Content-Type: application/json" -d '{"message": "hello"}'
