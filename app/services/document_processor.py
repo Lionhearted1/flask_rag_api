@@ -1,4 +1,3 @@
-# app/services/document_processor.py
 import logging
 from langchain_community.document_loaders import (
     PyPDFLoader, Docx2txtLoader, TextLoader, CSVLoader
@@ -8,9 +7,13 @@ from app.utils.errors import DocumentProcessingError
 import tempfile
 import os
 from flask import current_app
+import pinecone
+import uuid
 
 # Configure logger
 logger = logging.getLogger(__name__)
+
+from flask import current_app
 
 class DocumentProcessor:
     def __init__(self):
@@ -20,7 +23,8 @@ class DocumentProcessor:
             logger.debug("Setting up text splitter")
             self.text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=1000,
-                chunk_overlap=200
+                chunk_overlap=200,
+                separators=["\n\n", "\n", " ", ""]
             )
             logger.info("DocumentProcessor initialization completed successfully")
             
@@ -34,90 +38,88 @@ class DocumentProcessor:
         return current_app.vectorstore
 
     def get_all_documents(self):
-        """Get all documents from ChromaDB."""
+        """Get all documents from Pinecone with pagination."""
         try:
-            collection = self.vectorstore._collection
-            return collection.get()
+            # Use the vectorstore's internal Pinecone index
+            index = self.vectorstore._index
+            
+            # Use sparse vectors query to get all documents
+            results = []
+            batch_size = 1000
+            next_page_token = None
+            
+            while True:
+                response = index.query(
+                    vector=[0.0] * 768,  # Dimension for Google's embedding model
+                    top_k=batch_size,
+                    include_metadata=True,
+                    page_size=batch_size,
+                    next_page_token=next_page_token
+                )
+                
+                if not response.matches:
+                    break
+                
+                results.extend(response.matches)
+                next_page_token = getattr(response, 'next_page_token', None)
+                
+                if not next_page_token:
+                    break
+            
+            # Format the results to include only necessary information
+            formatted_results = []
+            for match in results:
+                formatted_results.append({
+                    'id': match.id,
+                    'metadata': match.metadata,
+                    'score': match.score
+                })
+            # logger.debug(formatted_results)
+            return formatted_results
         except Exception as e:
             logger.error(f"Error getting documents: {str(e)}", exc_info=True)
             raise DocumentProcessingError(str(e))
 
-    def delete_document(self, doc_id):
-        """Delete a document from ChromaDB."""
-        try:
-            collection = self.vectorstore._collection
-            collection.delete(ids=[doc_id])
-            self.vectorstore.persist()
-        except Exception as e:
-            logger.error(f"Error deleting document: {str(e)}", exc_info=True)
-            raise DocumentProcessingError(str(e))
-
-    def update_document(self, doc_id, metadata):
-        """Update document metadata in ChromaDB."""
-        try:
-            collection = self.vectorstore._collection
-            existing = collection.get(ids=[doc_id])
-            if not existing['ids']:
-                raise DocumentProcessingError("Document not found")
-            
-            # Merge existing metadata with updates
-            current_metadata = existing['metadatas'][0] if existing['metadatas'] else {}
-            updated_metadata = {**current_metadata, **metadata}
-            
-            collection.update(
-                ids=[doc_id],
-                metadatas=[updated_metadata]
-            )
-            self.vectorstore.persist()
-            return updated_metadata
-        except Exception as e:
-            logger.error(f"Error updating document: {str(e)}", exc_info=True)
-            raise DocumentProcessingError(str(e))
-
     def process_file(self, file):
-        """Process an uploaded file and store its chunks in ChromaDB."""
+        """Process an uploaded file and store its chunks in Pinecone."""
         logger.info(f"Processing file: {file.filename} (type: {file.content_type})")
         temp_dir = None
         temp_path = None
         
         try:
             # Create temporary directory and save file
-            logger.debug("Creating temporary directory")
             temp_dir = tempfile.mkdtemp()
             temp_path = os.path.join(temp_dir, file.filename)
             file.save(temp_path)
-            logger.debug(f"File saved temporarily at: {temp_path}")
             
             # Load and process document
-            logger.debug("Loading document")
             documents = self._load_document(temp_path, file.content_type)
-            logger.debug(f"Loaded {len(documents)} document(s)")
-            
-            logger.debug("Splitting documents into chunks")
             chunks = self.text_splitter.split_documents(documents)
-            logger.debug(f"Created {len(chunks)} chunks")
             
             # Add metadata to chunks
+            doc_ids = []
             for chunk in chunks:
+                doc_id = str(uuid.uuid4())
+                doc_ids.append(doc_id)
+                
                 if not chunk.metadata:
                     chunk.metadata = {}
-                chunk.metadata['fileName'] = file.filename
-                chunk.metadata['contentType'] = file.content_type
+                chunk.metadata.update({
+                    'fileName': file.filename,
+                    'contentType': file.content_type,
+                    'doc_id': doc_id,
+                    'text': chunk.page_content  # Required for Pinecone
+                })
             
-            # Add documents to ChromaDB using the application's vectorstore
-            logger.debug(f"Adding {len(chunks)} chunks to ChromaDB")
-            ids = self.vectorstore.add_documents(chunks)
-            
-            # Persist the changes to disk
-            logger.debug("Persisting changes to ChromaDB")
-            self.vectorstore.persist()
+            # Add documents to Pinecone
+            logger.debug(f"Adding {len(chunks)} chunks to Pinecone")
+            self.vectorstore.add_documents(chunks)
             
             logger.info(f"Successfully processed and stored {len(chunks)} chunks")
-            
             return {
                 'fileName': file.filename,
                 'chunks': len(chunks),
-                'ids': ids
+                'ids': doc_ids
             }
             
         except Exception as e:
@@ -126,11 +128,49 @@ class DocumentProcessor:
             
         finally:
             # Cleanup temporary files
-            logger.debug("Cleaning up temporary files")
             if temp_path and os.path.exists(temp_path):
                 os.remove(temp_path)
             if temp_dir and os.path.exists(temp_dir):
                 os.rmdir(temp_dir)
+
+    def delete_document(self, doc_id):
+        """Delete a document from Pinecone."""
+        try:
+            index = self.vectorstore._index
+            index.delete(ids=[doc_id])
+        except Exception as e:
+            logger.error(f"Error deleting document: {str(e)}", exc_info=True)
+            raise DocumentProcessingError(str(e))
+
+    def update_document(self, doc_id, metadata):
+        """Update document metadata in Pinecone."""
+        try:
+            index = self.vectorstore._index
+            # Get existing vector
+            vector_data = index.fetch([doc_id])
+            
+            if not vector_data.vectors:
+                raise DocumentProcessingError("Document not found")
+            
+            existing_vector = vector_data.vectors[doc_id]
+            
+            # Update metadata while preserving the vector and existing metadata
+            updated_metadata = {**existing_vector.metadata, **metadata}
+            
+            # Ensure text field is preserved
+            if 'text' not in updated_metadata and 'text' in existing_vector.metadata:
+                updated_metadata['text'] = existing_vector.metadata['text']
+            
+            index.upsert([(
+                doc_id,
+                existing_vector.values,
+                updated_metadata
+            )])
+            
+            return updated_metadata
+        except Exception as e:
+            logger.error(f"Error updating document: {str(e)}", exc_info=True)
+            raise DocumentProcessingError(str(e))
 
 #_load_document method:
     def _load_document(self, file_path, content_type):

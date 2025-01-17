@@ -49,27 +49,24 @@ def upload_document():
 
 @bp.route('/documents', methods=['GET'])
 def list_documents():
-    """List all processed documents."""
-    logger.info("Received request to list documents")
+    """List all documents in the Pinecone index."""
     try:
         processor = DocumentProcessor()
         documents = processor.get_all_documents()
         
-        # Format response
-        formatted_docs = []
-        for i, doc_id in enumerate(documents['ids']):
-            metadata = documents['metadatas'][i] if documents['metadatas'] else {}
-            formatted_docs.append({
-                'id': doc_id,
-                'metadata': metadata
+        # Process the list of documents
+        formatted_documents = []
+        for doc in documents:
+            formatted_documents.append({
+                'id': doc['id'],
+                'metadata': doc['metadata'],
+                'score': doc['score']
             })
-            
-        logger.info(f"Retrieved {len(formatted_docs)} documents")
-        return jsonify(formatted_docs)
         
+        return jsonify(formatted_documents), 200
     except Exception as e:
         logger.error(f"Error listing documents: {str(e)}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
 @bp.route('/documents/<id>', methods=['DELETE'])
 def delete_document(id):
