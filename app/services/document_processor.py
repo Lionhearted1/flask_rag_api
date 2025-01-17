@@ -40,9 +40,8 @@ class DocumentProcessor:
     def get_all_documents(self):
         """Get all documents from Pinecone with pagination."""
         try:
-            # Access the index_name from the Flask app context
-            index_name = current_app.pinecone_index_name
-            index = pinecone.Index(index_name,host=current_app.pinecone_environment)
+            # Use the vectorstore's internal Pinecone index
+            index = self.vectorstore._index
             
             # Use sparse vectors query to get all documents
             results = []
@@ -60,15 +59,23 @@ class DocumentProcessor:
                 
                 if not response.matches:
                     break
-                    
+                
                 results.extend(response.matches)
                 next_page_token = getattr(response, 'next_page_token', None)
                 
                 if not next_page_token:
                     break
             
-            return results
-            
+            # Format the results to include only necessary information
+            formatted_results = []
+            for match in results:
+                formatted_results.append({
+                    'id': match.id,
+                    'metadata': match.metadata,
+                    'score': match.score
+                })
+            # logger.debug(formatted_results)
+            return formatted_results
         except Exception as e:
             logger.error(f"Error getting documents: {str(e)}", exc_info=True)
             raise DocumentProcessingError(str(e))
@@ -129,7 +136,7 @@ class DocumentProcessor:
     def delete_document(self, doc_id):
         """Delete a document from Pinecone."""
         try:
-            index = pinecone.Index(self.vectorstore.index_name)
+            index = self.vectorstore._index
             index.delete(ids=[doc_id])
         except Exception as e:
             logger.error(f"Error deleting document: {str(e)}", exc_info=True)
@@ -138,7 +145,7 @@ class DocumentProcessor:
     def update_document(self, doc_id, metadata):
         """Update document metadata in Pinecone."""
         try:
-            index = pinecone.Index(self.vectorstore.index_name)
+            index = self.vectorstore._index
             # Get existing vector
             vector_data = index.fetch([doc_id])
             

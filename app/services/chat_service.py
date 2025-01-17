@@ -1,7 +1,5 @@
 import logging
-import re
 import os
-from typing import Optional, List, Dict, Any
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts import ChatPromptTemplate
@@ -35,7 +33,7 @@ class LLMFactory:
                 logger.warning("OpenAI API key not found, falling back to Google Gemini")
                 return LLMFactory._create_gemini(config)
             return LLMFactory._create_openai(config)
-        elif llm_type == 'gemini':
+        elif llm_type == 'google':
             if not google_config.get('api_key'):
                 logger.warning("Google API key not found, falling back to OpenAI")
                 return LLMFactory._create_openai(config)
@@ -66,13 +64,14 @@ class LLMFactory:
             api_key = google_config.get('api_key')
             model = google_config.get('model', 'gemini-1.5-flash')
         else:
-            api_key = config.google.api_key
+            # api_key = config.google.api_key
+            api_key=os.getenv('GOOGLE_API_KEY')
             model = getattr(config.google, 'model', 'gemini-1.5-flash')
         
         logger.info("Using Google Gemini LLM with model: %s", model)
         return ChatGoogleGenerativeAI(
-            google_api_key=api_key,
-            model_name=model
+            api_key=api_key,
+            model=model
         )
 
 class EmbeddingsFactory:
@@ -119,23 +118,23 @@ class EmbeddingsFactory:
         if isinstance(config, dict):
             api_key = config.get('google', {}).get('api_key')
         else:
-            api_key = config.google.api_key
+            # api_key = config.google.api_key
+            api_key=os.getenv('GOOGLE_API_KEY')
         
         logger.info("Using Google embeddings")
-        return GoogleGenerativeAIEmbeddings(
-            google_api_key=api_key
-        )
+        # return GoogleGenerativeAIEmbeddings(
+        #     google_api_key=api_key,
+        #     model=os.getenv('')
+        # )
+        return current_app.embeddings
+
 
 class ChatService:
     def __init__(self, config):
         """Initialize ChatService with configuration."""
         logger.info("Initializing ChatService")
         try:
-            # Ensure config is an instance of Config, not a dictionary
-            if isinstance(config, dict):
-                raise ValueError("Config must be an instance of the Config class, not a dictionary.")
-            
-            # Use the config object directly
+            # Store the config object
             self.config = config
             
             # Initialize LLM
@@ -144,16 +143,18 @@ class ChatService:
             
             # Initialize Pinecone
             logger.debug("Initializing Pinecone")
-            pinecone.init(
-                api_key=self.config.pinecone.api_key,  # Use dot notation
-                environment=self.config.pinecone.environment  # Use dot notation
+            pinecone_config = self.config.pinecone if hasattr(self.config, 'pinecone') else self.config.get('pinecone', {})
+            
+            # Create an instance of the Pinecone class
+            self.pinecone_client = pinecone.Pinecone(
+                api_key=pinecone_config.get('api_key')
             )
             
             # Initialize embeddings
             self.embeddings = EmbeddingsFactory.create_embeddings(self.config)
             
             # Initialize vector store
-            self.index_name = self.config.pinecone.index_name  # Use dot notation
+            self.index_name = pinecone_config.get('index_name', 'saanvi-production')
             self.vectorstore = PineconeVectorStore(
                 index_name=self.index_name,
                 embedding=self.embeddings
@@ -162,6 +163,7 @@ class ChatService:
             logger.debug("Setting up chat prompt template")
             self.prompt = ChatPromptTemplate.from_messages([
                 ("system", """You are Saanvi, an AI assistant specializing in cybersecurity. Your purpose is to provide clear and accurate answers based on the cyber security context provided through the book 'Cyber Safe Girl' by Dr. Ananth Prabhu G. If the context doesn't match the query, use your knowledge about cybersecurity, but maintain the focus on digital safety and security.
+                 Do not explictly mention about the source of the knowledge in your responses such as "the provided text ..."
 
 Instructions for formatting your responses:
 - Use only plain text without any special formatting
@@ -189,140 +191,6 @@ Remember to focus on cybersecurity aspects and digital safety while maintaining 
         except Exception as e:
             logger.error(f"Failed to initialize ChatService: {str(e)}", exc_info=True)
             raise
-
-
-    def extract_searchable_content(self, doc) -> List[str]:
-        """Extract all searchable content from a document, including metadata."""
-        searchable_content = []
-        
-        # Add page content
-        if doc.page_content:
-            searchable_content.append(doc.page_content)
-        
-        # Add relevant metadata content
-        for key, value in doc.metadata.items():
-            # Skip technical metadata
-            if key not in ['source', 'row_index', 'contentType', 'has_headers']:
-                if isinstance(value, (str, int, float)):
-                    searchable_content.append(str(value))
-        
-        return searchable_content
-
-    def calculate_match_score(self, query: str, text: str) -> float:
-        """Calculate how well a piece of text matches the query."""
-        score = 0.0
-        query_lower = query.lower()
-        text_lower = text.lower()
-        
-        # Exact phrase match
-        if query_lower in text_lower:
-            score += 10.0
-        
-        # Word matches
-        query_words = set(re.findall(r'\w+', query_lower))
-        text_words = set(re.findall(r'\w+', text_lower))
-        word_overlap = len(query_words & text_words)
-        score += word_overlap * 2.0
-        
-        # Partial matches
-        for word in query_words:
-            if len(word) > 3:  # Only check substantial words
-                if any(word in text_word for text_word in text_words):
-                    score += 0.5
-        
-        # Positional scoring (higher score if matches appear early in text)
-        first_occurrence = text_lower.find(query_words.pop() if query_words else query_lower)
-        if first_occurrence >= 0:
-            position_score = 1.0 - (first_occurrence / len(text_lower))
-            score += position_score * 2.0
-        
-        return score
-
-    def find_best_matches(self, query: str, docs: List, num_matches: int = 5) -> List:
-        """Find the most relevant documents for the query."""
-        logger.debug(f"Finding best matches for query: {query[:50]}...")
-        
-        scored_docs = []
-        for doc in docs:
-            max_score = 0.0
-            matched_content = None
-            
-            # First check metadata for matches
-            for key, value in doc.metadata.items():
-                if isinstance(value, (str, int, float)):
-                    score = self.calculate_match_score(query, str(value))
-                    if score > max_score:
-                        max_score = score
-                        matched_content = str(value)
-            
-            # Then check page content
-            score = self.calculate_match_score(query, doc.page_content)
-            if score > max_score:
-                max_score = score
-                matched_content = doc.page_content
-            
-            if max_score > 0:
-                # Store both the matched content and original document
-                scored_docs.append((doc, matched_content, max_score))
-        
-        # Sort by score and remove duplicates while preserving original content
-        scored_docs.sort(key=lambda x: x[2], reverse=True)
-        unique_docs = []
-        seen_content = set()
-        
-        for doc, matched_content, _ in scored_docs:
-            content_hash = hash(matched_content)
-            if content_hash not in seen_content and len(unique_docs) < num_matches:
-                seen_content.add(content_hash)
-                # Create a new document with the matched content and original metadata
-                from langchain_core.documents import Document
-                new_doc = Document(
-                    page_content=matched_content,
-                    metadata={
-                        **doc.metadata,
-                        'original_content': doc.page_content
-                    }
-                )
-                unique_docs.append(new_doc)
-        
-        logger.debug(f"Found {len(unique_docs)} unique matching documents")
-        return unique_docs
-
-    def format_document_content(self, doc) -> str:
-        """Format document content while preserving structure."""
-        logger.debug("Formatting document content")
-        
-        formatted_parts = []
-        
-        # Add the matched content first
-        if doc.page_content:
-            cleaned_content = doc.page_content.strip()
-            if cleaned_content:
-                formatted_parts.append(cleaned_content)
-        
-        # Add source information
-        source_info = f"[Source: {doc.metadata.get('source', 'Unknown')}]" if doc.metadata.get('source') else ""
-        
-        # For CSV files or other structured data, include any additional relevant metadata
-        relevant_metadata = []
-        for key, value in doc.metadata.items():
-            # Skip technical or duplicate metadata
-            if (key not in ['source', 'row_index', 'contentType', 'has_headers', 'original_content'] 
-                and isinstance(value, (str, int, float)) 
-                and str(value) not in formatted_parts):
-                relevant_metadata.append(f"{key}: {value}")
-        
-        if relevant_metadata:
-            metadata_str = " | ".join(relevant_metadata)
-            if metadata_str:
-                formatted_parts.append(metadata_str)
-        
-        # Join all parts
-        final_content = " | ".join(formatted_parts)
-        if source_info:
-            final_content = f"{final_content} {source_info}"
-        
-        return final_content
 
 # app/services/chat_service.py
 

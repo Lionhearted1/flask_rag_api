@@ -72,9 +72,11 @@ def create_app(config_class=Config):
             embedding=embeddings,
             text_key="text"
         )
+        app.embeddings=embeddings
         
         # Store the index_name in the app context for easy access
         app.pinecone_index_name = index_name
+        app.pinecone_host=os.getenv('PINECONE_HOST')
         
         
         # Register blueprints

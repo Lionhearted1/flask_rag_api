@@ -30,6 +30,9 @@ class Config:
             'api_key': os.getenv('GOOGLE_API_KEY'),
             'model': os.getenv('GOOGLE_MODEL', 'gemini-1.5-flash')
         }
+
+        self.llm_type=os.getenv('LLM_TYPE')
+        self.embedding_type=os.getenv('EMBEDDING_TYPE')
         
         # Pinecone Configuration
         self.pinecone = {
